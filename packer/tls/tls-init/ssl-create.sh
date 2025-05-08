@@ -8,18 +8,23 @@ DC2="us-east-1"
 # Clear old certificate data
 echo "[-] Clearing old CA and Certificate Data"
 sudo rm -rf ca/* certs/* keys/* req/* ./*.pem
-sudo rm -rf ../../common/cfg/tls/ca.pem
-sudo rm -rf ../../common/cfg/tls/ca-key.pem
-sudo rm -rf ../../common/cfg/tls/server.pem
-sudo rm -rf ../../common/cfg/tls/server-key.pem
+sudo rm -f ../../common/cfg/tls/ca.pem
+sudo rm -f ../../common/cfg/tls/ca-key.pem
+sudo rm -f ../../common/cfg/tls/server.pem
+sudo rm -f ../../common/cfg/tls/server-key.pem
 sleep 1
+
+# Recreate necessary directories
+mkdir -p ca certs keys req ../../common/cfg/tls
 
 echo "[+] Initializing Consul Connect CA"
 consul tls ca create -common-name "Consul Agent CA" -days=$(( 365 * 5 )) -domain consul
 
 echo "[+] Copying Connect CA Certs -> ca/ca.pem | ca/ca-key.pem"
-sudo cp -f -c consul-agent-ca.pem ca/ca.pem
-sudo cp -f -c consul-agent-ca-key.pem ca/ca-key.pem
+[[ -f consul-agent-ca.pem ]] || { echo "Missing consul-agent-ca.pem"; exit 1; }
+[[ -f consul-agent-ca-key.pem ]] || { echo "Missing consul-agent-ca-key.pem"; exit 1; }
+sudo cp -f consul-agent-ca.pem ca/ca.pem
+sudo cp -f consul-agent-ca-key.pem ca/ca-key.pem
 
 echo "[+] Generating Consul Server x509 Certificate using ca/consul-agent-ca-key.pem --> certs/server.pem"
 consul tls cert create -server -dc="$DC1" \
@@ -39,36 +44,40 @@ consul tls cert create -server -dc="$DC1" \
   -additional-ipaddress="10.0.0.0" \
   -additional-ipaddress="20.0.0.0"
 
-echo "[+] Copying Connect CA Certs -> ca/ca.pem | ca/ca-key.pem"
-sudo cp -f -c "$DC1-server-consul-0.pem" certs/server.pem
-sudo cp -f -c "$DC1-server-consul-0-key.pem" keys/server-key.pem
+echo "[+] Copying Server Certificate and Key"
+CERT_FILE="${DC1}-server-consul-0.pem"
+KEY_FILE="${DC1}-server-consul-0-key.pem"
 
-#sudo chmod 400 certs/server.pem
+[[ -f $CERT_FILE ]] || { echo "Missing $CERT_FILE"; exit 1; }
+[[ -f $KEY_FILE ]] || { echo "Missing $KEY_FILE"; exit 1; }
+
+sudo cp -f "$CERT_FILE" certs/server.pem
+sudo cp -f "$KEY_FILE" keys/server-key.pem
 
 echo "[+] Copying Consul CA and Server Certificates and Keys to root TLS directory"
-sudo cp ca/ca.pem ../../common/cfg/tls/ca.pem
-sudo cp ca/ca-key.pem ../../common/cfg/tls/ca-key.pem
-sudo cp certs/server.pem ../../common/cfg/tls/server.pem
-sudo cp keys/server-key.pem ../../common/cfg/tls/server-key.pem
+sudo cp -f ca/ca.pem ../../common/cfg/tls/ca.pem
+sudo cp -f ca/ca-key.pem ../../common/cfg/tls/ca-key.pem
+sudo cp -f certs/server.pem ../../common/cfg/tls/server.pem
+sudo cp -f keys/server-key.pem ../../common/cfg/tls/server-key.pem
 sudo chmod 0755 ../../common/cfg/tls/*
-sleep 1
 
+sleep 1
 echo "[+] Validate SAN IPs and DNS SANs below"
-if [[ "$( openssl x509 -pubkey -in ../../common/cfg/tls/server.pem -noout | openssl md5 )" == "$( openssl pkey -pubout -in ../../common/cfg/tls/server-key.pem | openssl md5 )" ]]; then
-  echo "[*] server.pem validation successful (/packer/common/cfg/tls/server.pem)!";
+
+if [[ "$(openssl x509 -pubkey -in ../../common/cfg/tls/server.pem -noout | openssl md5)" == "$(openssl pkey -pubout -in ../../common/cfg/tls/server-key.pem | openssl md5)" ]]; then
+  echo "[*] server.pem validation successful (/packer/common/cfg/tls/server.pem)!"
 else
-  clear
   echo "[-] Certificate validation failed (server.pem)!"
   exit 1
 fi
-if [[ "$( openssl x509 -pubkey -in ../../common/cfg/tls/ca.pem -noout | openssl md5 )" == "$( openssl pkey -pubout -in ../../common/cfg/tls/ca-key.pem | openssl md5 )" ]]; then
-  echo "[*] ca.pem validation successful (/packer/common/cfg/tls/ca.pem)!";
-  echo "[+] Verify certificate details below: "
+
+if [[ "$(openssl x509 -pubkey -in ../../common/cfg/tls/ca.pem -noout | openssl md5)" == "$(openssl pkey -pubout -in ../../common/cfg/tls/ca-key.pem | openssl md5)" ]]; then
+  echo "[*] ca.pem validation successful (/packer/common/cfg/tls/ca.pem)!"
+  echo "[+] Verify certificate details below:"
   openssl x509 -text -noout -in ../../common/cfg/tls/server.pem
 else
-  clear
   echo "[-] Certificate validation failed (ca.pem)!"
   exit 1
 fi
-echo "**** Done!"
 
+echo "**** Done!"
