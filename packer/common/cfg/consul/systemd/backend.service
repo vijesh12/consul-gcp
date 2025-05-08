@@ -1,0 +1,25 @@
+[Unit]
+Description="Backend Service"
+Documentation=https://github.com/nicholasjackson/fake-service
+Requires=network-online.target consul.service
+After=network-online.target
+Wants=consul.service
+ConditionFileNotEmpty=/etc/consul.d/002-backend.json
+
+[Service]
+Type=simple
+Environment=SERVER_TYPE=grpc
+Environment=TRACING_DATADOG_HOST=127.0.0.1
+Environment=TRACING_DATADOG_PORT=8126
+Environment=METRICS_DATADOG_HOST=127.0.0.1
+Environment=METRICS_DATADOG_PORT=8125
+Environment=LISTEN_ADDR=0.0.0.0:8080
+Environment=NAME=backend-service
+Environment=MESSAGE="BACKEND BACKEND BACKEND BACKEND"
+ExecStart=/usr/local/bin/fake-service
+ExecReload=/bin/kill --signal HUP $MAINPID
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Trigger raft-snapshots every 30 minutes
+Requires=raft-snapshots.service
+
+[Timer]
+SyslogIdentifier=raft-snapshots
+Unit=raft-snapshots.service
+OnUnitInactiveSec=30m
+AccuracySec=60s
+
+[Install]
+WantedBy=timers.target

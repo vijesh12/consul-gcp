@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+DATACENTER="${DATACENTER:=dc1}"
+ACLs="${ACLs:=disabled}"
+RPC_TLS="${RPC_TLS:=disabled}"
+
+bootstrap_token=""
+token_stanza=""
+ca_stanza=""
+crt_stanza=""
+key_stanza=""
+consul_api_url="\"127.0.0.1:8500\""
+consul_scheme_stanza="scheme = \"http\""
+
+function get_host_ip() {
+  eth_adapter="$1"
+  if [[ ($eth_adapter == null) || ($eth_adapter == "") ]];then  eth_adapter="eth1"; fi
+  ip -4 addr show "$eth_adapter" | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
+}
+
+function run_systemd_daemon_reload() {
+  # Create temp script to reload systemd daemon loader.
+  cat <<-RELOAD > /etc/vault.d/daemon-reload.sh
+#!/bin/bash
+sudo systemctl daemon-reload &>/dev/null
+sleep 2
+RELOAD
+  chmod +x /etc/vault.d/daemon-reload.sh
+  echo "[+] Reloading systemd Vault unit file..."
+  . "/etc/vault.d/daemon-reload.sh"
+  sudo rm -rf "/etc/vault.d/daemon-reload.sh"
+  echo "[+] systemctl daemon-reload successful!"
+}
+
+function add_consul_ca_ubuntu_trusted_store() {
+  echo "[+] Creating CA Trusted Store for Consul Certificates --> /usr/local/share/ca-certificates/consul_certs"
+  sudo mkdir --parents /usr/local/share/ca-certificates/consul_certs
+
+  echo "[+] Copying /etc/consul.d/tls/consul-agent-ca.pem --> /usr/local/share/ca-certificates/consul_certs/consul-agent-ca.crt"
+  sudo cp "/etc/consul.d/tls/consul-agent-ca.pem" "/usr/local/share/ca-certificates/consul_certs/consul-agent-ca.crt"
+
+  echo "[+] Setting folder permissions (0755) --> /usr/local/share/ca-certificates/consul_certs"
+  sudo chmod 0755 /usr/local/share/ca-certificates/consul_certs
+
+  echo "[+] Setting file permissions (0644) --> /usr/local/share/ca-certificates/consul_certs/consul-agent-ca.crt"
+  sudo chmod 0644 /usr/local/share/ca-certificates/consul_certs/consul-agent-ca.crt
+
+  echo "[+] Updating Ubuntu Trusted CA Store..."
+  sudo update-ca-certificates
+}
+
+echo "[+] Obtaining interface IP Information..."
+eth1_ip=""
+wan_ip=""
+wan_ip="$( get_host_ip "eth2" )"
+eth1_ip="$( get_host_ip "eth1" )"
+echo "[***] Vault Server WAN Interface IP: $wan_ip"
+
+echo "[+] Setting Vault TLS Certificate root and vault user permissions --> /opt/vault/tls"
+sudo chown root:root /opt/vault/tls --recursive
+sudo chown root:vault /opt/vault/tls/*key*
+sudo chmod 0644 /opt/vault/tls --recursive
+sudo chmod 0640 /opt/vault/tls/*key*
+
+if [[ ("$RPC_TLS" == "enabled") ]]; then
+  echo "[+] Consul TLS RPC Encryption Enabled: Configuring Vault for Consul TLS Authentication"
+  consul_api_url="\"127.0.0.1:8501\"";
+  ca_stanza="tls_ca_file = \"/etc/consul.d/tls/consul-agent-ca.pem\""
+  crt_stanza="tls_cert_file = \"/etc/consul.d/tls/$DATACENTER-client-consul.pem\""
+  key_stanza="tls_key_file = \"/etc/consul.d/tls/$DATACENTER-client-consul-key.pem\""
+  consul_scheme_stanza="scheme = \"https\""
+  add_consul_ca_ubuntu_trusted_store # Required for Vault to trust Consul CA via Linux System CA Trust Store
+fi
+
+if [[ ("$ACLs" == "enabled") ]]; then
+  echo "[+] Consul TLS ACLs Enabled: Configuring Vault for Consul ACL authentication"
+  bootstrap_token="$(sudo cat "/vagrant/configs/consul/acl/bootstrap")";
+  token_stanza="token = \"$bootstrap_token\""
+fi
+
+echo "[+] Generating Vault Configuration File --> /etc/vault.d/vault.hcl"
+(
+cat <<-EOF
+# Full configuration options can be found at https://www.vaultproject.io/docs/configuration
+ui = true
+
+# mlock = true
+# disable_mlock = true
+
+storage "consul" {
+  address = $consul_api_url
+  service_address = ""
+  $consul_scheme_stanza
+  path = "vault/"
+  $token_stanza
+  $ca_stanza
+  $crt_stanza
+  $key_stanza
+}
+
+api_addr = "http://$wan_ip:8200"
+cluster_addr = "https://$wan_ip:8201"
+plugin_directory = "/etc/vault.d/vault_plugins"
+
+primary_api_addr = "http://consul-dc1-client-0:8200"
+primary_cluster_addr = "https://consul-dc1-client-0:8201"
+
+# HTTP listener
+listener "tcp" {
+ address     = "0.0.0.0:8200"
+ tls_disable = "true"
+}
+
+# HTTPS listener
+# listener "tcp" {
+#  address            = "0.0.0.0:8200"
+#  tls_cert_file      = "/opt/vault/tls/vault-cert.pem"
+#  tls_key_file       = "/opt/vault/tls/vault-key.pem"
+#  tls_client_ca_file = "/opt/vault/tls/vault-ca.pem"
+#  tls_disable        = "false"
+# }
+
+service_registration "consul" {
+  service      = "vault"
+  address      = $consul_api_url
+  service_address = ""
+  $consul_scheme_stanza
+  service_tags = "vault_server_service"
+  $token_stanza
+  $ca_stanza
+  $crt_stanza
+  $key_stanza
+}
+
+# Enterprise license_path: This will be required for enterprise as of v1.8
+license_path = "/vagrant/configs/vault/enterprise-license/vault.hclic"
+EOF
+) | sudo tee /etc/vault.d/vault.hcl
+
+echo "[+] Enabling Vault service from /usr/lib/systemd/system/vault.service"
+/bin/sh -c 'sudo systemctl unmask vault.service'
+sudo systemctl enable vault.service
+
+echo "[+] Reloading Linux daemons...."
+run_systemd_daemon_reload
+
+echo "[+] Starting Vault service...."
+sudo systemctl start vault && sleep 5
+
+export VAULT_ADDR="http://$wan_ip:8200"
+
+if [[ ("$HOSTNAME" == "consul-$DATACENTER-client-0") ]]; then
+  echo "[+] Initializing Vault..."
+  vault operator init -key-shares=1 -key-threshold=1 -format=json | sudo tee "/vagrant/configs/vault/vault-keys-$DATACENTER.json"
+  echo "[+] Unsealing Vault..."
+  vault operator unseal "$( jq -r '.unseal_keys_hex[0]' /vagrant/configs/vault/vault-keys-$DATACENTER.json )"
+  echo
+fi
+
+root_token=$(jq -r '.root_token' /vagrant/configs/vault/vault-keys-$DATACENTER.json)
+export VAULT_TOKEN="$root_token"
+echo "[+++] Your Vault root token is:"
+echo
+echo "$root_token"
+echo
+
+echo "[+] Waiting for Vault to be healthy (HTTP Response: 200)--> curling: http://$wan_ip:8200/v1/sys/health..."
+resp_code=501
+retries=1
+until [[ (( $resp_code == 200 )) || (( $retries == 10 )) ]]; do
+  sleep 2
+  resp_code="$(curl -s -o /dev/null -I -w "%{http_code}" "http://$wan_ip:8200/v1/sys/health")"
+  retries=$(( retries + 1 ));
+done
+
+echo "[+] Setting Vault Daemon Environmental Vars --> /etc/vault.d/vault.env"
+(
+cat <<-VAULT_ENV
+VAULT_ADDR="http://$wan_ip:8200"
+VAULT_CLUSTER_ADDR="https://$wan_ip:8201"
+VAULT_TOKEN="$root_token"
+VAULT_REDIRECT_ADDR="http://$wan_ip:8200"
+VAULT_ENV
+) | sudo tee "/etc/vault.d/vault.env"
+
+echo "[+] Setting Vault System-Wide Environmental Vars --> /etc/profile.d/bash-hashicorp-env-vault.sh"
+(
+cat <<-VAULT_ENV
+export VAULT_ADDR="http://$wan_ip:8200"
+export VAULT_CLUSTER_ADDR="https://$wan_ip:8201"
+export VAULT_TOKEN="$root_token"
+export VAULT_REDIRECT_ADDR="http://$wan_ip:8200"
+VAULT_ENV
+) | sudo tee "/etc/profile.d/bash-hashicorp-env-vault.sh"
+
+echo "[+] Vault server initialization complete!"
+

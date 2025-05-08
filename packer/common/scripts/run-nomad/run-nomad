@@ -1,0 +1,396 @@
+#!/bin/bash
+# This script is used to configure and run Nomad on an AWS server.
+
+set -e
+
+readonly NOMAD_DEFAULT_USER="nomad"
+readonly NOMAD_OP_DIR="/opt/nomad"
+readonly NOMAD_DATA_DIR="$NOMAD_OP_DIR/data"
+readonly NOMAD_CFG_DIR="/etc/nomad.d"
+readonly NOMAD_BIN_DIR="$NOMAD_OP_DIR/bin"
+readonly SYSTEMD_CONFIG_PATH="/etc/systemd/system/nomad.service"
+readonly NOMAD_DEFAULT_LICENSE_PATH="$NOMAD_CFG_DIR/nomad.hclic"
+
+readonly EC2_INSTANCE_METADATA_URL="http://169.254.169.254/latest/meta-data"
+readonly EC2_INSTANCE_DYNAMIC_DATA_URL="http://169.254.169.254/latest/dynamic"
+
+readonly SCRIPT_NAME="$(basename "$0")"
+
+function print_usage {
+  echo
+  echo "Usage: run-nomad [OPTIONS]"
+  echo
+  echo "This script is used to configure and run Nomad on an AWS server."
+  echo
+  echo "Options:"
+  echo
+  echo -e "  --server\t\tIf set, run in server mode. Optional. At least one of --server or --client must be set."
+  echo -e "  --client\t\tIf set, run in client mode. Optional. At least one of --server or --client must be set."
+  echo -e "  --num-servers\t\tThe number of servers to expect in the Nomad cluster. Required if --server is true."
+  echo -e "  --config-dir\t\tThe path to the Nomad config folder. Optional. Default is the absolute path of '../config', relative to this script."
+  echo -e "  --data-dir\t\tThe path to the Nomad data folder. Optional. Default is the absolute path of '../data', relative to this script."
+  echo -e "  --bin-dir\t\tThe path to the folder with Nomad binary. Optional. Default is the absolute path of the parent folder of this script."
+  echo -e "  --systemd-stdout\t\tThe StandardOutput option of the systemd unit.  Optional.  If not configured, uses systemd's default (journal)."
+  echo -e "  --systemd-stderr\t\tThe StandardError option of the systemd unit.  Optional.  If not configured, uses systemd's default (inherit)."
+  echo -e "  --user\t\tThe user to run Nomad as. Optional. Default is to use the owner of --config-dir."
+  echo -e "  --use-sudo\t\tIf set, run the Nomad agent with sudo. By default, sudo is only used if --client is set."
+  echo -e "  --environment\t\A single environment variable in the key/value pair form 'KEY=\"val\"' to pass to Nomad as environment variable when starting it up. Repeat this option for additional variables. Optional."
+  echo -e "  --skip-nomad-config\tIf this flag is set, don't generate a Nomad configuration file. Optional. Default is false."
+  echo
+  echo "Example:"
+  echo
+  echo "  run-nomad --server --config-dir /custom/path/to/nomad/config"
+}
+
+function log {
+  local -r level="$1"
+  local -r message="$2"
+  local -r timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+  >&2 echo -e "${timestamp} [${level}] [$SCRIPT_NAME] ${message}"
+}
+
+function log_info {
+  local -r message="$1"
+  log "INFO" "$message"
+}
+
+function log_warn {
+  local -r message="$1"
+  log "WARN" "$message"
+}
+
+function log_error {
+  local -r message="$1"
+  log "ERROR" "$message"
+}
+
+# Based on code from: http://stackoverflow.com/a/16623897/483528
+function strip_prefix {
+  local -r str="$1"
+  local -r prefix="$2"
+  echo "${str#$prefix}"
+}
+
+function assert_not_empty {
+  local -r arg_name="$1"
+  local -r arg_value="$2"
+
+  if [[ -z "$arg_value" ]]; then
+    log_error "The value for '$arg_name' cannot be empty"
+    print_usage
+    exit 1
+  fi
+}
+
+function split_by_lines {
+  local prefix="$1"
+  shift
+
+  for var in "$@"; do
+    echo "${prefix}${var}"
+  done
+}
+
+function lookup_path_in_instance_metadata {
+  local -r path="$1"
+  curl --silent --location "$EC2_INSTANCE_METADATA_URL/$path/"
+}
+
+function lookup_path_in_instance_dynamic_data {
+  local -r path="$1"
+  curl --silent --location "$EC2_INSTANCE_DYNAMIC_DATA_URL/$path/"
+}
+
+function get_instance_ip_address {
+  lookup_path_in_instance_metadata "local-ipv4"
+}
+
+function get_instance_id {
+  lookup_path_in_instance_metadata "instance-id"
+}
+
+function get_instance_availability_zone {
+  lookup_path_in_instance_metadata "placement/availability-zone"
+}
+
+function get_instance_region {
+  lookup_path_in_instance_dynamic_data "instance-identity/document" | jq -r ".region"
+}
+
+function assert_is_installed {
+  local -r name="$1"
+
+  if [[ ! $(command -v "${name}") ]]; then
+    log_error "The binary '$name' is required by this script but is not installed or in the system's PATH."
+    exit 1
+  fi
+}
+
+function update_nomad_hcl {
+  local config_update="$1"
+  local -r update_title="$2"
+  local -r nomad_hcl_path="$NOMAD_CFG_DIR/nomad.hcl"
+  if [[ ! (-f "$nomad_hcl_path") ]]; then sudo touch "$nomad_hcl_path" && sudo chmod 0755 "$nomad_hcl_path"; fi
+
+  log_info "CONFIG UPDATE: $update_title ------> $nomad_hcl_path"
+  echo -ne "\n$config_update" | sudo tee --append "$nomad_hcl_path"
+}
+
+function update_server_config {
+  local bootstrap_expect="$1"
+  local license_path="$NOMAD_DEFAULT_LICENSE_PATH"
+
+  local server_config=""
+  server_config=$(cat <<-CONFIG
+server {
+  enabled = true
+  bootstrap_expect = $bootstrap_expect
+  license_path = "$license_path"
+}
+client {
+  enabled = false
+}
+CONFIG
+)
+  update_nomad_hcl "$server_config" "Updating Nomad HCL with Server Configuration: bootstrap expect --> $bootstrap_expect"
+}
+
+function update_client_config {
+  local client_config=""
+  client_config=$(cat <<-CONFIG
+client {
+  enabled = true
+}
+CONFIG
+)
+  update_nomad_hcl "$client_config" "Updating Nomad HCL with Client Configuration"
+}
+
+function update_retry_join {
+  local -r cluster_tag_key="${1}"
+  local -r cluster_tag_value="${2}"
+
+  local retry_join_hcl=""
+    retry_join_hcl=$(cat <<-RETRY_JOIN
+retry_join = ["provider=aws region=$instance_region tag_key=$cluster_tag_key tag_value=$cluster_tag_value"]
+RETRY_JOIN
+)
+  update_nomad_hcl "$retry_join_hcl" "Adding Nomad retry join stanza for AWS Provider: tag_key=$cluster_tag_key | tag_value=$cluster_tag_value"
+}
+
+
+function generate_nomad_config {
+  local -r server="$1"
+  local -r client="$2"
+  local -r num_servers="$3"
+  local -r config_dir="$4"
+  local -r data_dir="$5"
+  local -r user="$6"
+  local -r datacenter="$7"
+  local -r cluster_tag_key="$8"
+  local -r cluster_tag_value="$9"
+  local -r config_path="$config_dir/nomad.hcl"
+
+  local instance_id=""
+  local instance_ip_address=""
+  local instance_region=""
+
+  instance_id=$(get_instance_id)
+  instance_ip_address=$(get_instance_ip_address)
+  instance_region=$(get_instance_region)
+
+  # Delete nomad.hcl if re-run of script is required to not append and corrupt config.
+  if [[ (-f "$config_path") ]]; then sudo rm -rf "$config_path"; fi
+
+  if [[ "$server" == "true" ]]; then update_server_config "$num_servers"; fi
+  if [[ "$client" == "true" ]]; then update_client_config; fi
+
+  log_info "Preparing Default Nomad HCL configuration entries"
+  local nomad_config_hcl=""
+  nomad_config_hcl=$(cat <<-CONFIG
+data_dir   = "$data_dir"
+bind_addr  = "0.0.0.0"
+datacenter = "$datacenter"
+name       = "$instance_id"
+region     = "$instance_region"
+advertise {
+  http = "$instance_ip_address"
+  rpc  = "$instance_ip_address"
+  serf = "$instance_ip_address"
+}
+ports {
+  http = 4646
+  rpc  = 4647
+  serf = 4648
+}
+consul {
+  address = "127.0.0.1:8500"
+  auto_advertise      = true
+  server_auto_join    = true
+  client_auto_join    = true
+}
+CONFIG
+)
+
+  update_nomad_hcl "$nomad_config_hcl" "Applying Default Nomad Configuration HCL Entries"
+  if [[ ! ( -z "$cluster_tag_key" ) || ! ( -z "$cluster_tag_value" ) ]]; then
+    update_retry_join "$cluster_tag_key" "$cluster_tag_value"
+  fi
+
+  sudo chown "$user:$user" "$config_path"
+}
+
+function generate_systemd_config {
+  local -r server="$1"
+  local -r client="$2"
+
+  [[ ("$server" == "true") ]] && sudo cp "$NOMAD_BIN_DIR/config_files/daemons/nomad-server.service" "$SYSTEMD_CONFIG_PATH"
+  [[ ("$client" == "true") ]] && sudo cp "$NOMAD_BIN_DIR/config_files/daemons/nomad-client.service" "$SYSTEMD_CONFIG_PATH"
+
+  sudo chmod 0644 "$SYSTEMD_CONFIG_PATH"
+
+# Create temp script to reload systemd daemon loader.
+  local reload_script=""
+  reload_script=$(cat <<-RELOAD
+#!/bin/bash
+sudo systemctl enable nomad.service
+sudo systemctl daemon-reload &>/dev/null
+sleep 2
+RELOAD
+)
+  echo -e "$reload_script" | sudo tee /etc/nomad.d/reload.sh
+
+  sudo chmod +x /etc/nomad.d/reload.sh
+  log_info "Reloading systemd Nomad config..."
+  . "/etc/nomad.d/reload.sh"
+  sudo rm -rf "/etc/nomad.d/reload.sh"
+}
+
+function start_nomad {
+  log_info "Nomad Configuration Valid: Starting Nomad Service!"
+  sudo service nomad start
+}
+
+# Based on: http://unix.stackexchange.com/a/7732/215969
+function get_owner_of_path {
+  local -r path="$1"
+  # shellcheck disable=SC2012
+  ls -ld "$path" | awk '{print $3}'
+}
+
+function run {
+  local server="false"
+  local client="false"
+  local num_servers=""
+  local config_dir="$NOMAD_CFG_DIR"
+  local data_dir="$NOMAD_DATA_DIR"
+  local user="$NOMAD_DEFAULT_USER"
+  local skip_nomad_config="false"
+  local use_sudo=""
+  local datacenter=""
+  local cluster_tag_key=""
+  local cluster_tag_value=""
+  local environment=()
+
+  while [[ $# -gt 0 ]]; do
+    local key="$1"
+
+    case "$key" in
+      --server)
+        server="true"
+        ;;
+      --client)
+        client="true"
+        ;;
+      --num-servers)
+        num_servers="$2"
+        shift
+        ;;
+      --config-dir)
+        assert_not_empty "$key" "$2"
+        config_dir="$2"
+        shift
+        ;;
+      --data-dir)
+        assert_not_empty "$key" "$2"
+        data_dir="$2"
+        shift
+        ;;
+      --datacenter)
+        assert_not_empty "$key" "$2"
+        datacenter="$2"
+        shift
+        ;;
+      --user)
+        assert_not_empty "$key" "$2"
+        user="$2"
+        shift
+        ;;
+      --cluster-tag-key)
+        assert_not_empty "$key" "$2"
+        cluster_tag_key="$2"
+        shift
+        ;;
+      --cluster-tag-value)
+        assert_not_empty "$key" "$2"
+        cluster_tag_value="$2"
+        shift
+        ;;
+      --skip-nomad-config)
+        skip_nomad_config="true"
+        ;;
+      --use-sudo)
+        use_sudo="true"
+        ;;
+      --environment)
+        assert_not_empty "$key" "$2"
+        environment+=("$2")
+        shift
+        ;;
+      --help)
+        print_usage
+        exit
+        ;;
+      *)
+        log_error "Unrecognized argument: $key"
+        print_usage
+        exit 1
+        ;;
+    esac
+
+    shift
+  done
+
+  [[ "$server" == "true" ]] && assert_not_empty "--num-servers" "$num_servers"
+
+  if [[ -z "$datacenter"  ]];then datacenter="$( get_instance_region )"; fi
+
+  if [[ "$server" == "false" && "$client" == "false" ]]; then
+    log_error "At least one of --server or --client must be set"
+    exit 1
+  fi
+
+  if [[ -z "$use_sudo" ]]; then
+    if [[ "$client" == "true" ]]; then
+      use_sudo="true"
+    else
+      use_sudo="false"
+    fi
+  fi
+
+  assert_is_installed "systemctl"
+  assert_is_installed "aws"
+  assert_is_installed "curl"
+  assert_is_installed "jq"
+
+  if [[ "$skip_nomad_config" == "true" ]]; then
+    log_info "The --skip-nomad-config flag is set, so will not generate a default Nomad config file."
+  else
+    generate_nomad_config "$server" "$client" "$num_servers" "$config_dir" "$data_dir" "$user" "$datacenter" "$cluster_tag_key" "$cluster_tag_value"
+  fi
+
+  generate_systemd_config "$server" "$client"
+  start_nomad
+}
+
+run "$@"

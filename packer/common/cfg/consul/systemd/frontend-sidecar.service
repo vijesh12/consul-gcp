@@ -1,0 +1,22 @@
+[Unit]
+Description="Consul Envoy Sidecar for Frontend Service"
+Documentation=https://www.consul.io/
+Requires=network-online.target consul.service frontend.service
+After=network-online.target consul.service frontend.service
+ConditionFileNotEmpty=/etc/consul.d/002-frontend.json
+StartLimitIntervalSec=480
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=envoy
+Group=envoy
+EnvironmentFile=-/etc/consul.d/consul.env
+ExecStart=/usr/local/bin/consul connect envoy -sidecar-for frontend-1 -admin-bind="127.0.0.1:19001" -- --log-level trace --log-path /var/log/envoy/frontend-proxy.log --component-log-level upstream:trace,http:trace,router:trace,config:trace
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

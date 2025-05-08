@@ -1,0 +1,25 @@
+[Unit]
+Description="Frontend Service"
+Documentation=https://github.com/nicholasjackson/fake-service
+Requires=network-online.target consul.service
+After=network-online.target
+Wants=consul.service
+ConditionFileNotEmpty=/etc/consul.d/002-frontend.json
+
+[Service]
+Type=simple
+Environment=SERVER_TYPE=grpc
+Environment=TRACING_DATADOG_HOST=127.0.0.1
+Environment=TRACING_DATADOG_PORT=8126
+Environment=METRICS_DATADOG_HOST=127.0.0.1
+Environment=METRICS_DATADOG_PORT=8125
+Environment=LISTEN_ADDR=0.0.0.0:9090
+Environment=NAME=frontend-service
+Environment=MESSAGE="FRONTEND FRONTEND FRONTEND FRONTEND"
+Environment=UPSTREAM_URIS="grpc://127.0.0.1:8080"
+ExecStart=/usr/local/bin/fake-service
+ExecReload=/bin/kill --signal HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

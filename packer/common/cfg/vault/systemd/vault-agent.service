@@ -1,0 +1,19 @@
+[Unit]
+Description=Vault Agent
+Requires=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+
+[Service]
+SyslogIdentifier=vault-agent
+KillMode=process
+KillSignal=SIGINT
+ExecStart=/usr/bin/vault agent -config /etc/vault.d/
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

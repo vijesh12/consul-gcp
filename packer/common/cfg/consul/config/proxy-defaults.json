@@ -1,0 +1,28 @@
+{
+  "Kind": "proxy-defaults",
+  "Name": "global",
+  "Partition": "default",
+  "Namespace": "default",
+  "TransparentProxy": {
+    "OutboundListenerPort": 15001
+  },
+  "Config": {
+    "envoy_dogstatsd_url": "udp://127.0.0.1:8125",
+    "envoy_extra_static_clusters_json": "{\"connect_timeout\":\"3.000s\",\"dns_lookup_family\":\"V4_ONLY\",\"lb_policy\":\"ROUND_ROBIN\",\"load_assignment\":{\"cluster_name\":\"datadog_8126\",\"endpoints\":[{\"lb_endpoints\":[{\"endpoint\":{\"address\":{\"socket_address\":{\"address\":\"127.0.0.1\",\"port_value\":8126,\"protocol\":\"TCP\"}}}}]}]},\"name\":\"datadog_8126\",\"type\":\"STRICT_DNS\"}",
+    "envoy_prometheus_bind_addr": "127.0.0.1:9103",
+    "envoy_stats_bind_addr": "127.0.0.1:9104",
+    "envoy_tracing_json": "{\"http\":{\"name\":\"envoy.tracers.datadog\",\"typedConfig\":{\"@type\":\"type.googleapis.com/envoy.config.trace.v3.DatadogConfig\",\"collector_cluster\":\"datadog_8126\",\"service_name\":\"default-envoy-trace-pool\"}}}",
+    "handshake_timeout_ms": 10000,
+    "local_connect_timeout_ms": 15000,
+    "local_idle_timeout_ms": 15000,
+    "local_request_timeout_ms": 15000,
+    "max_inbound_connections": 4096,
+    "protocol": "http"
+  },
+  "MeshGateway": {
+    "Mode": "local"
+  },
+  "AccessLogs": {
+    "Enabled": false
+  }
+}

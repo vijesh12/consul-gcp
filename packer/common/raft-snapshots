@@ -1,0 +1,106 @@
+#!/bin/bash
+
+set -u # we'll handle errors manually
+
+### set up us some variables ###
+
+DEBUG="${DEBUG:-0}"  # set to non-0 for debug output
+HOST="${HOST:-$(uname -n)}"
+BUCKET="${BUCKET:-$(cat /etc/raft-snapshots-s3-bucket)}" # TODO: ask aws api?
+PROFILE_DIR="${PROFILE_DIR:-/etc/profile.d}"
+
+tmp_dir='raft-snapshots'
+TMP_DIR="$(mktemp --directory --suffix $tmp_dir 2>/dev/null || { mkdir -p /tmp/$tmp_dir; echo /tmp/$tmp_dir; })"
+
+
+### output ###
+
+# prefix stderr lines with <3> so they show up as errors in journald logs
+exec 2> >(sed 's/^/<3>/' >&2)
+
+debug() {
+  test "$DEBUG" == "0" || echo "$@"
+}
+
+### errors and exit ###
+
+exit_code=0
+err() {
+  >&2 echo ERROR "$@"
+  exit_code=1
+}
+
+trap 'cleanup' EXIT
+cleanup() {
+  debug "rm -rf $TMP_DIR"
+  rm -rf "$TMP_DIR"
+  exit "$exit_code"
+}
+
+
+### snap em up ###
+
+is_leader() {
+  local svc
+  svc="$1"
+
+  debug "$svc operator raft list-peers | grep '$HOST.*leader'"
+  peers="$($svc operator raft list-peers)"
+  test -n "$peers" || {
+    err "$svc failed to list raft peers"
+    return 1
+  }
+  grep -q "$HOST.*leader" <<< "$peers"
+}
+
+snap() {
+  local svc cmd file
+  svc="$1" ; shift
+  cmd="$svc $*"
+  file="$TMP_DIR/$svc-raft.snap"
+
+  # see if we can do the thing
+  test -f "$PROFILE_DIR/$svc.sh" || {
+    debug "$svc no $PROFILE_DIR/$svc.sh to source, skipping"
+    return 0
+  }
+  # shellcheck source=/dev/null
+  source "$PROFILE_DIR/$svc.sh"
+
+  pgrep "$svc" | grep -q . || {
+    debug "$svc not running, skipping"
+    return 0
+  }
+
+  is_leader "$svc" || {
+    debug "$svc not raft leader, skipping"
+    return 0
+  }
+
+  # do the thing
+  echo "$cmd $file"
+  $cmd "$file" >/dev/null || {
+    err "$svc snapshot failed"
+    return 1
+  }
+
+  upload "$svc" "$file" || {
+    err "$svc upload failed"
+    return 1
+  }
+
+  echo "$svc raft snapshot done!"
+}
+
+upload() {
+  local svc file
+  svc="$1"
+  file="$2"
+
+  debug "aws s3 mv --no-progress $file s3://$BUCKET/$svc-raft.snap"
+  printf '%s ' "$svc" ; aws s3 mv --no-progress "$file" "s3://$BUCKET/$svc-raft.snap"
+}
+
+snap consul snapshot save
+snap nomad operator snapshot save
+snap vault operator raft snapshot save

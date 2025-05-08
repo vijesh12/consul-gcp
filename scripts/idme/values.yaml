@@ -1,0 +1,112 @@
+global:
+  name: consul
+  datacenter: idig-prod-us-east1
+
+  peering:
+    enabled: false
+
+  tls:
+    enabled: true
+    enableAutoEncrypt: true
+
+  acls:
+    manageSystemACLs: true
+    bootstrapToken:
+      secretName: "bootstrap-token"
+      secretKey: "key"
+
+  enableConsulNamespaces: true
+  adminPartitions:
+    enabled: false
+    name: default
+
+  enterpriseLicense:
+    secretName: license
+    secretKey: key
+    enableLicenseAutoload: true
+
+  federation:
+    enabled: true
+
+  gossipEncryption:
+    autoGenerate: false
+
+  metrics:
+    enabled: true
+    enableAgentMetrics: true
+    enableGatewayMetrics: true
+    agentMetricsRetentionTime: 1h
+    prefixFilter:
+      allowList: [ "consul.rpc.server.call" ]
+
+  ui:
+    enabled: true
+
+connectInject:
+  enabled: true
+  replicas: 2
+  transparentProxy:
+    defaultEnabled: false
+
+server:
+  enabled: true
+  exposeService:
+    enabled: true
+    annotations: |
+      "networking.gke.io/load-balancer-type": "Internal"
+      "networking.gke.io/internal-load-balancer-allow-global-access": "true"
+      cloud.google.com/neg: '{"ingress": true}'
+  replicas: 3
+  resources:
+    limits:
+      cpu: "32"
+      memory: 150Gi
+    requests:
+      cpu: "16"
+      memory: 75Gi
+  storage: 261Gi
+  storageClass: premium-rwo
+  extraConfig: |
+    {
+      "log_level": "TRACE",
+      "leave_on_terminate": true,
+      "audit": {
+        "enabled": true,
+        "sink": {
+          "My sink": {
+            "type": "file",
+            "format": "json",
+            "path": "/dev/stdout",
+            "delivery_guarantee": "best-effort"
+          }
+        }
+      },
+      "limits": {
+        "http_max_conns_per_client": -1,
+        "rpc_max_conns_per_client": -1,
+        "rpc_max_burst": 65535
+      }
+    }
+
+meshGateway:
+  enabled: true
+  replicas: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 500Mi
+    requests:
+      cpu: 500m
+      memory: 500Mi
+  service:
+    annotations: |
+      'networking.gke.io/load-balancer-type': Internal
+  affinity: |
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: {{ template "consul.name" . }}
+              release: "{{ .Release.Name }}"
+              component: mesh-gateway
+          topologyKey: kubernetes.io/hostname

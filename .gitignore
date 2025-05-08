@@ -1,0 +1,33 @@
+# Terraform files
+.terraform
+terraform.tfstate
+terraform.tfvars
+*.tfstate*
+.terraform.lock.hcl
+
+# OS X files
+.history
+.DS_Store
+
+# IntelliJ files
+.idea_modules
+*.iml
+*.iws
+*.ipr
+.idea/
+build/
+*/build/
+out/
+
+# Consul Licensing
+*.hclic
+# aws Keys
+*.pem
+
+# aws creds
+.envrc
+.env
+
+# consul-debug-bundles
+*.tar.gz
+*.gz

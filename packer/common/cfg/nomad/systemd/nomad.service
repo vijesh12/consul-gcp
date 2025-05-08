@@ -1,0 +1,32 @@
+[Unit]
+Description=Nomad
+Documentation=https://www.nomadproject.io/docs/
+# When using Nomad with Consul it is not necessary to start Consul first. These
+# lines start Consul before Nomad as an optimization to avoid Nomad logging
+# that Consul is unavailable at startup.
+Wants=network-online.target consul.service consul-template.service
+After=network-online.target consul.service consul-template.service
+## Configure unit start rate limiting. Units which are started more than
+## *burst* times within an *interval* time span are not permitted to start any
+## more. Use `StartLimitIntervalSec` or `StartLimitInterval` (depending on
+## systemd version) to configure the checking interval and `StartLimitBurst`
+## to configure how many starts per interval are allowed. The values in the
+## commented lines are defaults.
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/local/bin/nomad agent -config /etc/nomad.d
+KillMode=process
+KillSignal=SIGINT
+LimitNOFILE=65536
+LimitNPROC=infinity
+Restart=always
+RestartSec=2
+TasksMax=infinity
+RestartSec=60
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1 @@
+{{ with secret "engineering/eng-serv-ops/nomad/creds/management" }}{{ .Data.secret_id }}{{ end }}

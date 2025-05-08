@@ -1,0 +1,5 @@
+{
+  "Datacenter": "us-east-2",
+  "Node": "${HOSTNAME}",
+  "ServiceID": "ingress-service"
+}

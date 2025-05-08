@@ -1,0 +1,14 @@
+[Unit]
+Description=Create and upload Raft snapshots to S3
+Wants=raft-snapshots.timer
+
+[Service]
+SyslogIdentifier=raft-snapshots
+ExecStart=/usr/local/bin/raft-snapshots
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

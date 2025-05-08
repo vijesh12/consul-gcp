@@ -1,0 +1,21 @@
+[Unit]
+Description="HashiCorp Consul Replicate - KV Replication Across DCs"
+Documentation=https://www.consul.io/
+Requires=consul.service
+After=network-online.target consul.service
+StartLimitIntervalSec=480
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=consul
+Group=consul
+EnvironmentFile=-/etc/consul.d/consul.env
+ExecStart=/usr/local/bin/consul-replicate -config /etc/consul-replicate.d/config.hcl
+ExecReload=/bin/kill --signal HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
